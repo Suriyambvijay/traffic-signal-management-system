@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Analytics — Smart Traffic Signal Management</title>
+<link href="css/style.css" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+</head>
+<body>
+<div class="topbar" id="topbar"></div>
+
+<div class="wrap">
+  <div class="grid">
+    <div class="card">
+      <h3>Vehicle count — last 20 cycles</h3>
+      <div class="chartwrap"><canvas id="trendChart" role="img" aria-label="Line chart of vehicle count over the last 20 signal cycles">Trend of total vehicles detected per cycle.</canvas></div>
+    </div>
+    <div class="card">
+      <h3>Congestion prediction (next 4 cycles)</h3>
+      <div class="chartwrap"><canvas id="predictChart" role="img" aria-label="Bar chart predicting congestion level for the next four cycles">Predicted congestion score per upcoming cycle.</canvas></div>
+    </div>
+  </div>
+  <div class="grid" style="margin-top:18px">
+    <div class="card">
+      <h3>Event log <small>emergency / accident, from Firestore</small></h3>
+      <div class="log" id="eventLog"><div class="row"><span class="t">—</span><span>Loading events…</span></div></div>
+    </div>
+    <div class="card">
+      <h3>Cloud database sync</h3>
+      <table class="mini">
+        <tr><td>Provider</td><td style="text-align:right">Firebase Firestore</td></tr>
+        <tr><td>Records synced (this session)</td><td style="text-align:right; font-family:var(--mono)" id="cloudRecords">0</td></tr>
+        <tr><td>Total records (all time)</td><td style="text-align:right; font-family:var(--mono)" id="cloudTotal">—</td></tr>
+        <tr><td>Last sync</td><td style="text-align:right; font-family:var(--mono)" id="cloudLast">—</td></tr>
+      </table>
+      <div class="btnrow"><button class="btn-app ghost" id="btnExport">Export report (CSV)</button></div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:18px">
+    <h3>Latest traffic data from Firebase <small id="latestTrafficStatus">loading</small></h3>
+    <table class="mini">
+      <tr><td>Total vehicles</td><td id="latestTotal" style="text-align:right; font-family:var(--mono)">—</td></tr>
+      <tr><td>Traffic density</td><td id="latestDensity" style="text-align:right">—</td></tr>
+      <tr><td>Traffic score</td><td id="latestScore" style="text-align:right; font-family:var(--mono)">—</td></tr>
+      <tr><td>Average wait</td><td id="latestWait" style="text-align:right; font-family:var(--mono)">—</td></tr>
+      <tr><td>Active signal</td><td id="latestSignal" style="text-align:right">—</td></tr>
+    </table>
+    <table class="mini" style="margin-top:12px">
+      <thead><tr><th>Lane</th><th>Vehicles</th><th>Density</th></tr></thead>
+      <tbody id="latestLanes"><tr><td colspan="3">Loading lane counts…</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<script src="js/firebase-config.js"></script>
+<script src="js/auth.js"></script>
+<script src="js/navbar.js"></script>
+<script src="js/detection.js"></script>
+<script>
+let currentUser = null;
+requireAuth((user) => {
+  currentUser = user;
+  renderNavbar("analytics", user);
+  init();
+});
+
+function init() {
+  document.getElementById("cloudRecords").textContent = TrafficEngine.state.cloudRecords;
+
+  const trendChart = new Chart(document.getElementById("trendChart"), {
+    type: "line",
+    data: { labels: TrafficEngine.state.history.map((_, i) => "c" + (i + 1)), datasets: [{ label: "Total vehicles", data: TrafficEngine.state.history, borderColor: "#4C8DFF", backgroundColor: "rgba(76,141,255,.1)", fill: true, tension: .3, pointRadius: 2 }] },
+    options: { responsive: true, maintainAspectRatio: false,
+      scales: { y: { beginAtZero: true, ticks: { color: "#5C6B8A" }, grid: { color: "#1E2C46" } }, x: { ticks: { color: "#5C6B8A" }, grid: { display: false } } },
+      plugins: { legend: { display: false } } }
+  });
+
+  const lastScore = TrafficEngine.state.history.length ? TrafficEngine.state.history[TrafficEngine.state.history.length - 1] * 3 : 30;
+  const predictData = [1, 2, 3, 4].map((i) => Math.min(100, Math.max(5, Math.round(lastScore + (Math.random() - 0.4) * 10 * i / 2))));
+  new Chart(document.getElementById("predictChart"), {
+    type: "bar",
+    data: { labels: ["+15 min", "+30 min", "+45 min", "+60 min"], datasets: [{ label: "Predicted congestion", data: predictData, backgroundColor: predictData.map(v => v > 70 ? "#e34948" : v > 40 ? "#eda100" : "#1baf7a"), borderRadius: 4, maxBarThickness: 36 }] },
+    options: { responsive: true, maintainAspectRatio: false,
+      scales: { y: { beginAtZero: true, max: 100, ticks: { color: "#5C6B8A" }, grid: { color: "#1E2C46" } }, x: { ticks: { color: "#5C6B8A" }, grid: { display: false } } },
+      plugins: { legend: { display: false } } }
+  });
+
+  // pull events + count from Firestore
+  db.collection("users").doc(currentUser.uid).collection("events").orderBy("createdAt", "desc").limit(20).get()
+    .then((snap) => {
+      const el = document.getElementById("eventLog");
+      el.innerHTML = "";
+      if (snap.empty) {
+        el.innerHTML = '<div class="row"><span class="t">—</span><span>No events yet. Run detections on the Input page.</span></div>';
+        return;
+      }
+      snap.forEach((doc) => {
+        const d = doc.data();
+        const time = d.createdAt ? d.createdAt.toDate().toLocaleTimeString() : "—";
+        const row = document.createElement("div");
+        row.className = "row alert";
+        row.innerHTML = `<span class="t">${time}</span><span>${d.message}</span>`;
+        el.appendChild(row);
+      });
+    })
+    .catch(() => { document.getElementById("eventLog").innerHTML = '<div class="row"><span class="t">—</span><span>Could not load events (check Firestore rules/config).</span></div>'; });
+
+  db.collection("users").doc(currentUser.uid).collection("detections").get()
+    .then((snap) => { document.getElementById("cloudTotal").textContent = snap.size; document.getElementById("cloudLast").textContent = new Date().toLocaleTimeString(); })
+    .catch(() => { document.getElementById("cloudTotal").textContent = "—"; });
+
+  loadLatestTraffic();
+}
+
+function loadLatestTraffic() {
+  const userRef = db.collection("users").doc(currentUser.uid);
+  userRef.collection("traffic").doc("latest").get().then((snapshot) => {
+    if (snapshot.exists) return snapshot.data();
+    return userRef.get().then((userSnapshot) => userSnapshot.exists ? userSnapshot.data().latestTraffic : null);
+  }).then((traffic) => {
+    if (!traffic) throw new Error("No traffic data");
+    document.getElementById("latestTotal").textContent = traffic.vehicleCount ?? traffic.total ?? "—";
+    document.getElementById("latestDensity").textContent = traffic.density || "—";
+    document.getElementById("latestScore").textContent = traffic.score ?? "—";
+    document.getElementById("latestWait").textContent = traffic.wait == null ? "—" : traffic.wait + "s";
+    const signal = traffic.signal || {};
+    document.getElementById("latestSignal").textContent = signal.active ? signal.active + " / " + (signal.phase || "—") : "—";
+    const rows = document.getElementById("latestLanes");
+    rows.innerHTML = "";
+    ["N", "E", "S", "W"].forEach((lane) => {
+      const details = traffic.lanes && traffic.lanes[lane] ? traffic.lanes[lane] : {};
+      rows.innerHTML += `<tr><td>${lane}</td><td>${details.count ?? 0}</td><td>${TrafficEngine.DENSITY_LABEL[details.density] || details.density || "—"}</td></tr>`;
+    });
+    document.getElementById("latestTrafficStatus").textContent = "synced from Firestore";
+  }).catch(() => {
+    document.getElementById("latestTrafficStatus").textContent = "no saved traffic data";
+    document.getElementById("latestLanes").innerHTML = '<tr><td colspan="3">Run detection on the Input page first.</td></tr>';
+  });
+}
+
+document.getElementById("btnExport").addEventListener("click", () => {
+  const s = TrafficEngine.state;
+  const rows = [["lane", "vehicles", "density"], ...["N", "E", "S", "W"].map((l) => [l, s.lanes[l].count, s.lanes[l].density])];
+  const csv = rows.map((r) => r.join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "traffic_report.csv"; a.click();
+});
+</script>
+</body>
+</html>

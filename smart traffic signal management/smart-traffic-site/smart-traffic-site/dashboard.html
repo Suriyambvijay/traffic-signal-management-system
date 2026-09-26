@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dashboard — Smart Traffic Signal Management</title>
+<link href="css/style.css" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+</head>
+<body>
+<div class="topbar" id="topbar"></div>
+
+<div class="wrap">
+  <div class="alert-banner" id="alertBanner"><span id="alertText"></span></div>
+
+  <div class="metrics">
+    <div class="metric"><div class="lbl">Vehicles detected</div><div class="val" id="m-vehicles">0</div><div class="sub">across 4 lanes</div></div>
+    <div class="metric"><div class="lbl">Traffic density</div><div class="val" id="m-density">—</div><div class="sub" id="m-density-sub">awaiting data</div></div>
+    <div class="metric"><div class="lbl">Avg. wait time</div><div class="val" id="m-wait">0s</div><div class="sub">per vehicle</div></div>
+    <div class="metric good"><div class="lbl">Traffic score</div><div class="val" id="m-score">—</div><div class="sub">0 = clear, 100 = gridlock</div></div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h3>Live detection feed <small id="dash-src">no source loaded</small></h3>
+      <div class="dashboard-lane-grid" id="dashboardLaneGrid">
+        <div class="dashboard-lane"><strong>North</strong><div class="viewport" id="dashViewport-N"><div class="placeholder">No North source</div></div></div>
+        <div class="dashboard-lane"><strong>East</strong><div class="viewport" id="dashViewport-E"><div class="placeholder">No East source</div></div></div>
+        <div class="dashboard-lane"><strong>South</strong><div class="viewport" id="dashViewport-S"><div class="placeholder">No South source</div></div></div>
+        <div class="dashboard-lane"><strong>West</strong><div class="viewport" id="dashViewport-W"><div class="placeholder">No West source</div></div></div>
+      </div>
+      <div class="pipeline" style="margin-top:14px" id="pipeline">
+        <div class="step" data-s="0">Input</div><div class="arrow">›</div>
+        <div class="step" data-s="1">Preprocess</div><div class="arrow">›</div>
+        <div class="step" data-s="2">Vehicle detection</div><div class="arrow">›</div>
+        <div class="step" data-s="3">Density calc</div><div class="arrow">›</div>
+        <div class="step" data-s="4">Emergency/accident check</div><div class="arrow">›</div>
+        <div class="step" data-s="5">Decision engine</div><div class="arrow">›</div>
+        <div class="step" data-s="6">Signal update</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Junction signal — Main St &amp; 5th Ave</h3>
+      <div class="junction"><div class="crossgrid" id="crossgrid"></div></div>
+      <table class="mini" style="margin-top:6px">
+        <thead><tr><th>Lane</th><th>Vehicles</th><th>Density</th><th>Phase</th></tr></thead>
+        <tbody id="laneTable"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="grid" style="margin-top:18px">
+    <div class="card">
+      <h3>System log</h3>
+      <div class="log" id="sysLog"></div>
+    </div>
+    <div class="card">
+      <h3>Vehicle class breakdown</h3>
+      <div class="chartwrap"><canvas id="classChart" role="img" aria-label="Doughnut chart of vehicle classes detected">Vehicle classes detected in current frame.</canvas></div>
+    </div>
+  </div>
+
+  <div class="footer-note">
+    Detection runs client-side as a simulation of the real pipeline. Connect a Flask + YOLOv8 backend and point
+    <code>js/detection.js</code> at its API to replace the simulated inference with real model output.
+  </div>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<script src="js/firebase-config.js"></script>
+<script src="js/auth.js"></script>
+<script src="js/navbar.js"></script>
+<script src="js/detection.js"></script>
+<script>
+let currentUser = null;
+
+requireAuth((user) => {
+  currentUser = user;
+  renderNavbar("dashboard", user);
+  init();
+});
+
+function pushLog(containerId, msg, cls) {
+  const el = document.getElementById(containerId);
+  const row = document.createElement("div");
+  row.className = "row" + (cls ? " " + cls : "");
+  row.innerHTML = `<span class="t">${new Date().toLocaleTimeString()}</span><span>${msg}</span>`;
+  el.prepend(row);
+  while (el.children.length > 40) el.removeChild(el.lastChild);
+}
+function showAlert(msg) {
+  const b = document.getElementById("alertBanner");
+  document.getElementById("alertText").textContent = msg;
+  b.classList.add("show");
+  clearTimeout(showAlert._t);
+  showAlert._t = setTimeout(() => b.classList.remove("show"), 6000);
+}
+
+window.addEventListener("traffic:stored", () => showAlert("Traffic count and details stored in Firebase."));
+window.addEventListener("traffic:storage-error", (event) => {
+  const code = event.detail && event.detail.code ? " (" + event.detail.code + ")" : "";
+  showAlert("Firebase rejected the traffic save" + code + ". Check Firestore rules and sign-in status.");
+});
+
+function renderJunction() {
+  const el = document.getElementById("crossgrid");
+  const s = TrafficEngine.state;
+  el.innerHTML = "";
+  ["N", "E", "S", "W"].forEach((l) => {
+    const isActive = s.signal.active === l;
+    const phase = isActive ? s.signal.phase : "red";
+    const wrap = document.createElement("div");
+    wrap.className = "sig lanepos-" + l;
+    wrap.innerHTML = `<div class="lane-label">${{N:"North",S:"South",E:"East",W:"West"}[l]}</div>
+      <div class="lights">
+        <div class="light ${phase==="red"?"on red":""}"></div>
+        <div class="light ${phase==="yellow"?"on yellow":""}"></div>
+        <div class="light ${phase==="green"?"on green":""}"></div>
+      </div>`;
+    el.appendChild(wrap);
+  });
+  const hub = document.createElement("div");
+  hub.className = "center-hub";
+  hub.innerHTML = `<div class="timer">${s.signal.remaining}</div><div class="tl">sec · lane ${s.signal.active}</div>`;
+  el.appendChild(hub);
+}
+
+function renderLaneTable() {
+  const s = TrafficEngine.state;
+  const tb = document.getElementById("laneTable");
+  tb.innerHTML = "";
+  ["N", "E", "S", "W"].forEach((l) => {
+    const d = s.lanes[l];
+    const phase = s.signal.active === l ? s.signal.phase : "red";
+    tb.innerHTML += `<tr><td>${l}</td><td>${d.count}</td><td><span class="tag ${d.density}">${TrafficEngine.DENSITY_LABEL[d.density]}</span></td>
+      <td style="text-transform:capitalize; color:${phase==="green"?"var(--green)":phase==="yellow"?"var(--amber)":"var(--red)"}">${phase}</td></tr>`;
+  });
+}
+
+function playPipeline(cb) {
+  const steps = document.querySelectorAll("#pipeline .step");
+  let i = 0;
+  steps.forEach((s) => s.classList.remove("active"));
+  const iv = setInterval(() => {
+    steps.forEach((s) => s.classList.remove("active"));
+    if (steps[i]) steps[i].classList.add("active");
+    i++;
+    if (i > steps.length) { clearInterval(iv); steps.forEach((s) => s.classList.remove("active")); if (cb) cb(); }
+  }, 180);
+}
+
+let classChart;
+const dashMedia = { N: null, E: null, S: null, W: null };
+const dashLaneOrder = ["N", "E", "S", "W"];
+const sourceDbPromise = new Promise((resolve, reject) => {
+  const request = indexedDB.open("smart-traffic-sources", 1);
+  request.onupgradeneeded = () => request.result.createObjectStore("lanes");
+  request.onsuccess = () => resolve(request.result);
+  request.onerror = () => reject(request.error);
+});
+function ensureChart() {
+  if (classChart) return;
+  classChart = new Chart(document.getElementById("classChart"), {
+    type: "doughnut",
+    data: { labels: ["Car", "Bike", "Auto", "Truck", "Bus", "Emergency"],
+      datasets: [{ data: [0,0,0,0,0,0], backgroundColor: ["#2a78d6","#eb6834","#1baf7a","#eda100","#e87ba4","#e34948"], borderColor: "#111A2C", borderWidth: 2 }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom", labels: { color: "#93A2C2", font: { size: 11 }, boxWidth: 10 } } } }
+  });
+}
+
+async function runDetection() {
+  const activeLanes = dashLaneOrder.filter((lane) => dashMedia[lane]);
+  if (!activeLanes.length) { showAlert("Load lane footage on the Video / Image Input tab first."); return; }
+  ensureChart();
+  playPipeline(async () => {
+    const laneResults = await Promise.all(activeLanes.map((lane) => TrafficEngine.runDetection(dashMedia[lane], { lane, persist: false })));
+    const classes = { car: 0, bike: 0, auto: 0, bus: 0, truck: 0, emergency: 0 };
+    let total = 0;
+    laneResults.forEach((item) => { total += item.total; Object.keys(classes).forEach((key) => { classes[key] += item.classes[key]; }); });
+    const result = { total, classes, overallDensity: TrafficEngine.densityFromCount(Math.round((total / 4) * 1.3)),
+      wait: Math.round(8 + total * 1.6), score: Math.min(100, Math.round(total * 3.1 + (classes.emergency ? 15 : 0))),
+      lanes: JSON.parse(JSON.stringify(TrafficEngine.state.lanes)) };
+    TrafficEngine.persistResult(result, currentUser.uid, { sourceCount: activeLanes.length });
+    sessionStorage.setItem("st_lane_counts", JSON.stringify(result.lanes));
+    document.getElementById("m-vehicles").textContent = result.total;
+    document.getElementById("m-density").textContent = TrafficEngine.DENSITY_LABEL[result.overallDensity];
+    document.getElementById("m-density-sub").textContent = result.total + " vehicles across junction";
+    document.getElementById("m-wait").textContent = result.wait + "s";
+    const scoreEl = document.getElementById("m-score");
+    scoreEl.textContent = result.score;
+    scoreEl.parentElement.className = "metric " + (result.score > 70 ? "bad" : result.score > 40 ? "warn" : "good");
+
+    classChart.data.datasets[0].data = [result.classes.car, result.classes.bike, result.classes.auto, result.classes.truck, result.classes.bus, result.classes.emergency];
+    classChart.update();
+
+    renderLaneTable();
+    renderJunction();
+    if (result.classes.emergency > 0) {
+      showAlert("Emergency vehicle detected — signal override: immediate green issued.");
+      pushLog("sysLog", "Emergency vehicle detected — immediate green override triggered", "alert");
+    }
+    pushLog("sysLog", `Frame analyzed — ${result.total} vehicles, density ${TrafficEngine.DENSITY_LABEL[result.overallDensity]}, score ${result.score}`, null);
+  });
+}
+
+function mountDashboardSource(lane, source) {
+  const viewport = document.getElementById("dashViewport-" + lane);
+  const placeholder = viewport.querySelector(".placeholder");
+  placeholder.style.display = "none";
+  const media = document.createElement(source.type === "video" ? "video" : "img");
+  if (source.type === "video") { media.src = source.url; media.loop = true; media.muted = true; media.autoplay = true; media.playsInline = true; }
+  else media.src = source.url;
+  viewport.appendChild(media);
+  dashMedia[lane] = media;
+  media.onload = media.onloadeddata = runDetection;
+  if (source.type === "video") setInterval(() => { if (!media.paused && !media.ended) runDetection(); }, 3000);
+}
+
+function init() {
+  renderJunction();
+  renderLaneTable();
+  pushLog("sysLog", "Dashboard loaded — waiting for input source", null);
+
+  const savedSources = JSON.parse(sessionStorage.getItem("st_lane_media") || "{}");
+  const savedCounts = JSON.parse(sessionStorage.getItem("st_lane_counts") || "{}");
+  dashLaneOrder.forEach((lane) => {
+    if (savedCounts[lane]) TrafficEngine.state.lanes[lane] = savedCounts[lane];
+    const source = savedSources[lane];
+    if (!source) return;
+    if (source.stored) {
+      sourceDbPromise.then((db) => new Promise((resolve, reject) => {
+        const request = db.transaction("lanes", "readonly").objectStore("lanes").get(lane);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      })).then((file) => {
+        if (file) mountDashboardSource(lane, { type: source.type, url: URL.createObjectURL(file) });
+      }).catch(() => {});
+    } else mountDashboardSource(lane, source);
+  });
+  if (Object.keys(savedSources).length) document.getElementById("dash-src").textContent = Object.keys(savedSources).length + " lane sources from Input page";
+  renderLaneTable();
+
+  setInterval(() => { TrafficEngine.tick(() => { renderJunction(); renderLaneTable(); }); }, 1000);
+}
+</script>
+</body>
+</html>

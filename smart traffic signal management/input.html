@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Video / Image Input — Smart Traffic Signal Management</title>
+<link href="css/style.css" rel="stylesheet">
+</head>
+<body>
+<div class="topbar" id="topbar"></div>
+
+<div class="wrap">
+  <div class="alert-banner" id="alertBanner"><span id="alertText"></span></div>
+  <div class="grid">
+    <div class="card">
+      <h3>Load traffic footage</h3>
+      <div class="dropzone" id="dropzone">
+        <div class="t1">Upload MP4 video or JPG/PNG image</div>
+        <div class="t2">Click to browse, or drop a file here</div>
+        <input type="file" id="fileInput" accept="video/mp4,image/jpeg,image/png,image/jpg" style="display:none">
+      </div>
+      <div class="btnrow">
+        <button class="btn-app" id="btnWebcam">Use live webcam</button>
+        <button class="btn-app ghost" id="btnDemo">Load demo traffic sample</button>
+        <button class="btn-app ghost" id="btnStop">Stop / clear</button>
+      </div>
+      <div style="margin-top:16px">
+        <div class="viewport" id="inputViewport" style="aspect-ratio:16/10">
+          <div class="placeholder" id="inputPlaceholder">No source loaded yet.</div>
+          <span class="badge" id="inputBadge" style="display:none">Frame <span id="frameNum">0</span></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Preprocessing pipeline</h3>
+      <div class="opt-row"><div><div class="lbl">Resize frames</div><div class="desc">Normalize to 640×640 for inference</div></div><label class="switch"><input type="checkbox" checked disabled><span class="slider-tg"></span></label></div>
+      <div class="opt-row"><div><div class="lbl">Contrast / low-light enhancement</div><div class="desc">CLAHE-based image quality boost</div></div><label class="switch"><input type="checkbox" checked><span class="slider-tg"></span></label></div>
+      <div class="opt-row"><div><div class="lbl">Lane boundary overlay</div><div class="desc">Draw detected lane regions</div></div><label class="switch"><input type="checkbox" checked><span class="slider-tg"></span></label></div>
+      <div class="opt-row"><div><div class="lbl">Bounding boxes</div><div class="desc">Show YOLOv8 detection boxes</div></div><label class="switch"><input type="checkbox" checked><span class="slider-tg"></span></label></div>
+
+      <h3 style="margin-top:20px">Frame detection summary</h3>
+      <table class="mini">
+        <tr><td>Vehicles this frame</td><td id="s-vc" style="text-align:right; font-family:var(--mono)">—</td></tr>
+        <tr><td>Cars / Bikes / Auto</td><td id="s-light" style="text-align:right; font-family:var(--mono)">—</td></tr>
+        <tr><td>Buses / Trucks</td><td id="s-heavy" style="text-align:right; font-family:var(--mono)">—</td></tr>
+        <tr><td>Emergency vehicles</td><td id="s-emg" style="text-align:right; font-family:var(--mono)">—</td></tr>
+        <tr><td>Inference time</td><td id="s-inf" style="text-align:right; font-family:var(--mono)">—</td></tr>
+      </table>
+      <div class="btnrow"><button class="btn-app" id="btnAnalyze">Run detection on current frame</button></div>
+      <div class="footer-note" style="margin-top:16px; text-align:left">
+        Loaded footage carries over to the Dashboard automatically. Detection records write to
+        <code>users/&lt;uid&gt;/detections</code> in Firestore.
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:18px">
+    <h3>Signal response <small>updates automatically as traffic is detected</small></h3>
+    <div class="junction"><div class="crossgrid" id="crossgrid"></div></div>
+    <table class="mini" style="margin-top:6px">
+      <thead><tr><th>Lane</th><th>Vehicles</th><th>Density</th><th>Phase</th></tr></thead>
+      <tbody id="laneTable"></tbody>
+    </table>
+  </div>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<script src="js/firebase-config.js"></script>
+<script src="js/auth.js"></script>
+<script src="js/navbar.js"></script>
+<script src="js/detection.js"></script>
+<script>
+let currentUser = null, currentMedia = null, vidInterval = null;
+
+requireAuth((user) => {
+  currentUser = user;
+  renderNavbar("input", user);
+  renderJunction();
+  renderLaneTable();
+  setInterval(() => { TrafficEngine.tick(() => { renderJunction(); renderLaneTable(); }); }, 1000);
+});
+
+function renderJunction() {
+  const el = document.getElementById("crossgrid");
+  const s = TrafficEngine.state;
+  el.innerHTML = "";
+  ["N", "E", "S", "W"].forEach((l) => {
+    const isActive = s.signal.active === l;
+    const phase = isActive ? s.signal.phase : "red";
+    const wrap = document.createElement("div");
+    wrap.className = "sig lanepos-" + l;
+    wrap.innerHTML = `<div class="lane-label">${{N:"North",S:"South",E:"East",W:"West"}[l]}</div>
+      <div class="lights">
+        <div class="light ${phase==="red"?"on red":""}"></div>
+        <div class="light ${phase==="yellow"?"on yellow":""}"></div>
+        <div class="light ${phase==="green"?"on green":""}"></div>
+      </div>`;
+    el.appendChild(wrap);
+  });
+  const hub = document.createElement("div");
+  hub.className = "center-hub";
+  hub.innerHTML = `<div class="timer">${s.signal.remaining}</div><div class="tl">sec · lane ${s.signal.active}</div>`;
+  el.appendChild(hub);
+}
+
+function renderLaneTable() {
+  const s = TrafficEngine.state;
+  const tb = document.getElementById("laneTable");
+  tb.innerHTML = "";
+  ["N", "E", "S", "W"].forEach((l) => {
+    const d = s.lanes[l];
+    const phase = s.signal.active === l ? s.signal.phase : "red";
+    tb.innerHTML += `<tr><td>${l}</td><td>${d.count}</td><td><span class="tag ${d.density}">${TrafficEngine.DENSITY_LABEL[d.density]}</span></td>
+      <td style="text-transform:capitalize; color:${phase==="green"?"var(--green)":phase==="yellow"?"var(--amber)":"var(--red)"}">${phase}</td></tr>`;
+  });
+}
+
+function showAlert(msg) {
+  const b = document.getElementById("alertBanner");
+  document.getElementById("alertText").textContent = msg;
+  b.classList.add("show");
+  clearTimeout(showAlert._t);
+  showAlert._t = setTimeout(() => b.classList.remove("show"), 6000);
+}
+
+function clearViewport() {
+  document.getElementById("inputViewport").querySelectorAll("canvas, video, img").forEach((n) => n.remove());
+}
+
+function loadImage(url) {
+  clearInterval(vidInterval);
+  clearViewport();
+  document.getElementById("inputPlaceholder").style.display = "none";
+  const img = new Image();
+  img.onload = () => {
+    document.getElementById("inputViewport").appendChild(img);
+    document.getElementById("inputBadge").style.display = "flex";
+    document.getElementById("frameNum").textContent = "1 (static)";
+    currentMedia = img;
+    sessionStorage.setItem("st_media_type", "image");
+    sessionStorage.setItem("st_media_url", url);
+    runDetection();
+  };
+  img.src = url;
+}
+
+function loadVideo(url) {
+  clearInterval(vidInterval);
+  clearViewport();
+  document.getElementById("inputPlaceholder").style.display = "none";
+  const vid = document.createElement("video");
+  vid.src = url; vid.loop = true; vid.muted = true; vid.autoplay = true; vid.playsInline = true;
+  document.getElementById("inputViewport").appendChild(vid);
+  document.getElementById("inputBadge").style.display = "flex";
+  currentMedia = vid;
+  sessionStorage.setItem("st_media_type", "video");
+  sessionStorage.setItem("st_media_url", url);
+
+  let frame = 0;
+  vidInterval = setInterval(() => {
+    if (vid.paused || vid.ended) return;
+    frame++;
+    document.getElementById("frameNum").textContent = frame;
+    runDetection();
+  }, 2600);
+}
+
+document.getElementById("dropzone").addEventListener("click", () => document.getElementById("fileInput").click());
+document.getElementById("fileInput").addEventListener("change", (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  const url = URL.createObjectURL(f);
+  f.type.startsWith("video") ? loadVideo(url) : loadImage(url);
+});
+["dragover", "dragenter"].forEach((evt) => document.getElementById("dropzone").addEventListener(evt, (e) => { e.preventDefault(); e.target.style.borderColor = "#4C8DFF"; }));
+document.getElementById("dropzone").addEventListener("drop", (e) => {
+  e.preventDefault();
+  const f = e.dataTransfer.files[0]; if (!f) return;
+  const url = URL.createObjectURL(f);
+  f.type.startsWith("video") ? loadVideo(url) : loadImage(url);
+});
+
+document.getElementById("btnDemo").addEventListener("click", () => {
+  const c = document.createElement("canvas"); c.width = 640; c.height = 360;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#3a3f47"; ctx.fillRect(0, 0, 640, 360);
+  ctx.fillStyle = "#55595f";
+  for (let i = 0; i < 6; i++) ctx.fillRect(0, 40 + i * 50, 640, 4);
+  const colors = ["#c0392b", "#2980b9", "#f1c40f", "#27ae60", "#7f8c8d", "#8e44ad", "#e67e22"];
+  for (let i = 0; i < 14; i++) {
+    ctx.fillStyle = colors[i % colors.length];
+    const x = Math.random() * 580, y = 30 + Math.random() * 300, w = 30 + Math.random() * 30, h = 16 + Math.random() * 14;
+    ctx.fillRect(x, y, w, h);
+  }
+  loadImage(c.toDataURL());
+});
+
+document.getElementById("btnWebcam").addEventListener("click", async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    clearInterval(vidInterval);
+    clearViewport();
+    document.getElementById("inputPlaceholder").style.display = "none";
+    const vid = document.createElement("video"); vid.srcObject = stream; vid.autoplay = true; vid.muted = true; vid.playsInline = true;
+    document.getElementById("inputViewport").appendChild(vid);
+    document.getElementById("inputBadge").style.display = "flex";
+    currentMedia = vid;
+    sessionStorage.removeItem("st_media_url");
+    sessionStorage.setItem("st_media_type", "webcam");
+    vidInterval = setInterval(runDetection, 3000);
+  } catch (err) {
+    showAlert("Could not access webcam — check browser permissions.");
+  }
+});
+
+document.getElementById("btnStop").addEventListener("click", () => {
+  clearInterval(vidInterval);
+  clearViewport();
+  document.getElementById("inputPlaceholder").style.display = "flex";
+  document.getElementById("inputBadge").style.display = "none";
+  currentMedia = null;
+  sessionStorage.removeItem("st_media_type");
+  sessionStorage.removeItem("st_media_url");
+});
+
+document.getElementById("btnAnalyze").addEventListener("click", runDetection);
+
+async function runDetection() {
+  if (!currentMedia) { showAlert("Load a video or image first."); return; }
+  const result = await TrafficEngine.runDetection(currentMedia, { uid: currentUser.uid });
+  document.getElementById("s-vc").textContent = result.total;
+  document.getElementById("s-light").textContent = `${result.classes.car} / ${result.classes.bike} / ${result.classes.auto}`;
+  document.getElementById("s-heavy").textContent = `${result.classes.bus} / ${result.classes.truck}`;
+  document.getElementById("s-emg").textContent = result.classes.emergency;
+  document.getElementById("s-inf").textContent = result.inf + " ms";
+  renderJunction();
+  renderLaneTable();
+  if (result.classes.emergency > 0) showAlert("Emergency vehicle detected — signal override issued.");
+}
+</script>
+</body>
+</html>
