@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Video / Image Input — Smart Traffic Signal Management</title>
+<link href="css/style.css" rel="stylesheet">
+</head>
+<body>
+<div class="topbar" id="topbar"></div>
+
+<div class="wrap">
+  <div class="alert-banner" id="alertBanner"><span id="alertText"></span></div>
+  <div class="grid">
+    <div class="card lane-input-card">
+      <h3>Load four-way traffic footage <small>one source per lane</small></h3>
+      <div class="lane-input-grid">
+        <div class="lane-input" data-lane="N">
+          <div class="lane-input-title"><strong>North lane</strong><span id="laneStatus-N">No source</span></div>
+          <div class="dropzone lane-dropzone" id="dropzone-N"><div class="t1">Upload video or image</div><div class="t2">Click or drop file</div><input type="file" id="fileInput-N" accept="video/mp4,image/jpeg,image/png,image/jpg" style="display:none"></div>
+          <div class="viewport lane-viewport" id="laneViewport-N"><div class="placeholder">North camera</div></div>
+        </div>
+        <div class="lane-input" data-lane="E">
+          <div class="lane-input-title"><strong>East lane</strong><span id="laneStatus-E">No source</span></div>
+          <div class="dropzone lane-dropzone" id="dropzone-E"><div class="t1">Upload video or image</div><div class="t2">Click or drop file</div><input type="file" id="fileInput-E" accept="video/mp4,image/jpeg,image/png,image/jpg" style="display:none"></div>
+          <div class="viewport lane-viewport" id="laneViewport-E"><div class="placeholder">East camera</div></div>
+        </div>
+        <div class="lane-input" data-lane="S">
+          <div class="lane-input-title"><strong>South lane</strong><span id="laneStatus-S">No source</span></div>
+          <div class="dropzone lane-dropzone" id="dropzone-S"><div class="t1">Upload video or image</div><div class="t2">Click or drop file</div><input type="file" id="fileInput-S" accept="video/mp4,image/jpeg,image/png,image/jpg" style="display:none"></div>
+          <div class="viewport lane-viewport" id="laneViewport-S"><div class="placeholder">South camera</div></div>
+        </div>
+        <div class="lane-input" data-lane="W">
+          <div class="lane-input-title"><strong>West lane</strong><span id="laneStatus-W">No source</span></div>
+          <div class="dropzone lane-dropzone" id="dropzone-W"><div class="t1">Upload video or image</div><div class="t2">Click or drop file</div><input type="file" id="fileInput-W" accept="video/mp4,image/jpeg,image/png,image/jpg" style="display:none"></div>
+          <div class="viewport lane-viewport" id="laneViewport-W"><div class="placeholder">West camera</div></div>
+        </div>
+      </div>
+      <div class="btnrow">
+        <button class="btn-app" id="btnWebcam">Use webcam for North</button>
+        <button class="btn-app ghost" id="btnDemo">Load demo samples for all lanes</button>
+        <button class="btn-app ghost" id="btnStop">Stop / clear</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Preprocessing pipeline</h3>
+      <div class="opt-row"><div><div class="lbl">Resize frames</div><div class="desc">Normalize to 640×640 for inference</div></div><label class="switch"><input type="checkbox" checked disabled><span class="slider-tg"></span></label></div>
+      <div class="opt-row"><div><div class="lbl">Contrast / low-light enhancement</div><div class="desc">CLAHE-based image quality boost</div></div><label class="switch"><input type="checkbox" checked><span class="slider-tg"></span></label></div>
+      <div class="opt-row"><div><div class="lbl">Lane boundary overlay</div><div class="desc">Draw detected lane regions</div></div><label class="switch"><input type="checkbox" checked><span class="slider-tg"></span></label></div>
+      <div class="opt-row"><div><div class="lbl">Bounding boxes</div><div class="desc">Show YOLOv8 detection boxes</div></div><label class="switch"><input type="checkbox" checked><span class="slider-tg"></span></label></div>
+
+      <h3 style="margin-top:20px">Frame detection summary</h3>
+      <table class="mini">
+        <tr><td>Vehicles this frame</td><td id="s-vc" style="text-align:right; font-family:var(--mono)">—</td></tr>
+        <tr><td>Cars / bicycles / motorcycles</td><td id="s-light" style="text-align:right; font-family:var(--mono)">—</td></tr>
+        <tr><td>Buses / Trucks</td><td id="s-heavy" style="text-align:right; font-family:var(--mono)">—</td></tr>
+        <tr><td>Emergency vehicle classification</td><td id="s-emg" style="text-align:right; font-family:var(--mono)">—</td></tr>
+        <tr><td>Inference time</td><td id="s-inf" style="text-align:right; font-family:var(--mono)">—</td></tr>
+      </table>
+      <div class="btnrow"><button class="btn-app" id="btnAnalyze">Run detection on current frame</button></div>
+      <div class="footer-note" style="margin-top:16px; text-align:left">
+        Loaded footage carries over to the Dashboard automatically. Detection records write to
+        <code>users/&lt;uid&gt;/detections</code> in Firestore.
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:18px">
+    <h3>Signal response <small>updates automatically as traffic is detected</small></h3>
+    <div class="junction"><div class="crossgrid" id="crossgrid"></div></div>
+    <table class="mini" style="margin-top:6px">
+      <thead><tr><th>Lane</th><th>Vehicles</th><th>Density</th><th>Phase</th></tr></thead>
+      <tbody id="laneTable"></tbody>
+    </table>
+  </div>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<script src="js/firebase-config.js"></script>
+<script src="js/auth.js"></script>
+<script src="js/navbar.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+<script src="js/detection.js"></script>
+<script>
+let currentUser = null;
+const laneMedia = { N: null, E: null, S: null, W: null };
+const laneIntervals = { N: null, E: null, S: null, W: null };
+const laneStored = { N: false, E: false, S: false, W: false };
+const laneOrder = ["N", "E", "S", "W"];
+const sourceDbPromise = new Promise((resolve, reject) => {
+  const request = indexedDB.open("smart-traffic-sources", 1);
+  request.onupgradeneeded = () => request.result.createObjectStore("lanes");
+  request.onsuccess = () => resolve(request.result);
+  request.onerror = () => reject(request.error);
+});
+
+requireAuth((user) => {
+  currentUser = user;
+  renderNavbar("input", user);
+  renderJunction();
+  renderLaneTable();
+  setInterval(() => { TrafficEngine.tick(() => { renderJunction(); renderLaneTable(); }); }, 1000);
+});
+
+function renderJunction() {
+  const el = document.getElementById("crossgrid");
+  const s = TrafficEngine.state;
+  el.innerHTML = "";
+  ["N", "E", "S", "W"].forEach((l) => {
+    const isActive = s.signal.active === l;
+    const phase = isActive ? s.signal.phase : "red";
+    const wrap = document.createElement("div");
+    wrap.className = "sig lanepos-" + l;
+    wrap.innerHTML = `<div class="lane-label">${{N:"North",S:"South",E:"East",W:"West"}[l]}</div>
+      <div class="lights">
+        <div class="light ${phase==="red"?"on red":""}"></div>
+        <div class="light ${phase==="yellow"?"on yellow":""}"></div>
+        <div class="light ${phase==="green"?"on green":""}"></div>
+      </div>`;
+    el.appendChild(wrap);
+  });
+  const hub = document.createElement("div");
+  hub.className = "center-hub";
+  hub.innerHTML = `<div class="timer">${s.signal.remaining}</div><div class="tl">sec · lane ${s.signal.active}</div>`;
+  el.appendChild(hub);
+}
+
+function renderLaneTable() {
+  const s = TrafficEngine.state;
+  const tb = document.getElementById("laneTable");
+  tb.innerHTML = "";
+  ["N", "E", "S", "W"].forEach((l) => {
+    const d = s.lanes[l];
+    const phase = s.signal.active === l ? s.signal.phase : "red";
+    tb.innerHTML += `<tr><td>${l}</td><td>${d.count}</td><td><span class="tag ${d.density}">${TrafficEngine.DENSITY_LABEL[d.density]}</span></td>
+      <td style="text-transform:capitalize; color:${phase==="green"?"var(--green)":phase==="yellow"?"var(--amber)":"var(--red)"}">${phase}</td></tr>`;
+  });
+}
+
+function showAlert(msg) {
+  const b = document.getElementById("alertBanner");
+  document.getElementById("alertText").textContent = msg;
+  b.classList.add("show");
+  clearTimeout(showAlert._t);
+  showAlert._t = setTimeout(() => b.classList.remove("show"), 6000);
+}
+
+window.addEventListener("traffic:stored", () => showAlert("Traffic count and lane details stored in Firebase."));
+window.addEventListener("traffic:detection-error", () => showAlert("Vehicle model unavailable. Check your connection and reload the page."));
+window.addEventListener("traffic:storage-error", (event) => {
+  const code = event.detail && event.detail.code ? " (" + event.detail.code + ")" : "";
+  showAlert("Firebase rejected the traffic save" + code + ". Check Firestore rules and sign-in status.");
+});
+
+function clearLane(lane) {
+  clearInterval(laneIntervals[lane]);
+  laneIntervals[lane] = null;
+  const viewport = document.getElementById("laneViewport-" + lane);
+  viewport.querySelectorAll("canvas, video, img").forEach((node) => node.remove());
+  viewport.querySelector(".placeholder").style.display = "flex";
+  document.getElementById("laneStatus-" + lane).textContent = "No source";
+  laneMedia[lane] = null;
+  laneStored[lane] = false;
+  TrafficEngine.state.lanes[lane] = { count: 0, density: "low" };
+  sessionStorage.setItem("st_lane_counts", JSON.stringify(TrafficEngine.state.lanes));
+}
+
+function saveLaneSources() {
+  const sources = {};
+  laneOrder.forEach((lane) => {
+    const media = laneMedia[lane];
+    if (media) sources[lane] = { type: media.tagName.toLowerCase(), url: media.currentSrc || media.src, stored: laneStored[lane] };
+  });
+  sessionStorage.setItem("st_lane_media", JSON.stringify(sources));
+}
+
+function loadSource(lane, url, type) {
+  clearLane(lane);
+  const viewport = document.getElementById("laneViewport-" + lane);
+  const placeholder = viewport.querySelector(".placeholder");
+  placeholder.style.display = "none";
+  const media = document.createElement(type === "video" ? "video" : "img");
+  if (type === "video") {
+    media.src = url; media.loop = true; media.muted = true; media.autoplay = true; media.playsInline = true;
+  } else {
+    media.src = url;
+  }
+  viewport.appendChild(media);
+  laneMedia[lane] = media;
+  document.getElementById("laneStatus-" + lane).textContent = type === "video" ? "Video loaded" : "Image loaded";
+  saveLaneSources();
+  if (type === "video") laneIntervals[lane] = setInterval(() => { if (!media.paused && !media.ended) runDetection(); }, 3000);
+  media.onload = media.onloadeddata = () => runDetection();
+}
+
+function handleFile(lane, file) {
+  if (!file) return;
+  sourceDbPromise.then((db) => new Promise((resolve, reject) => {
+    const transaction = db.transaction("lanes", "readwrite");
+    transaction.objectStore("lanes").put(file, lane);
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error);
+  })).then(() => {
+    loadSource(lane, URL.createObjectURL(file), file.type.startsWith("video") ? "video" : "image");
+    laneStored[lane] = true;
+    saveLaneSources();
+  }).catch(() => showAlert("Could not cache the lane file in this browser."));
+}
+
+laneOrder.forEach((lane) => {
+  const dropzone = document.getElementById("dropzone-" + lane);
+  const input = document.getElementById("fileInput-" + lane);
+  dropzone.addEventListener("click", () => input.click());
+  input.addEventListener("change", (event) => handleFile(lane, event.target.files[0]));
+  ["dragover", "dragenter"].forEach((eventName) => dropzone.addEventListener(eventName, (event) => { event.preventDefault(); dropzone.style.borderColor = "#4C8DFF"; }));
+  dropzone.addEventListener("drop", (event) => { event.preventDefault(); handleFile(lane, event.dataTransfer.files[0]); });
+});
+
+function createDemoImage() {
+  const c = document.createElement("canvas"); c.width = 640; c.height = 360;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#3a3f47"; ctx.fillRect(0, 0, 640, 360);
+  ctx.fillStyle = "#55595f";
+  for (let i = 0; i < 6; i++) ctx.fillRect(0, 40 + i * 50, 640, 4);
+  const colors = ["#c0392b", "#2980b9", "#f1c40f", "#27ae60", "#7f8c8d", "#8e44ad", "#e67e22"];
+  for (let i = 0; i < 14; i++) {
+    ctx.fillStyle = colors[i % colors.length];
+    const x = Math.random() * 580, y = 30 + Math.random() * 300, w = 30 + Math.random() * 30, h = 16 + Math.random() * 14;
+    ctx.fillRect(x, y, w, h);
+  }
+  return c.toDataURL();
+}
+
+document.getElementById("btnDemo").addEventListener("click", () => laneOrder.forEach((lane) => loadSource(lane, createDemoImage(), "image")));
+
+document.getElementById("btnWebcam").addEventListener("click", async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    clearLane("N");
+    const viewport = document.getElementById("laneViewport-N");
+    viewport.querySelector(".placeholder").style.display = "none";
+    const vid = document.createElement("video"); vid.srcObject = stream; vid.autoplay = true; vid.muted = true; vid.playsInline = true;
+    viewport.appendChild(vid);
+    laneMedia.N = vid;
+    document.getElementById("laneStatus-N").textContent = "Webcam active";
+    laneIntervals.N = setInterval(runDetection, 3000);
+  } catch (err) {
+    showAlert("Could not access webcam — check browser permissions.");
+  }
+});
+
+document.getElementById("btnStop").addEventListener("click", () => {
+  laneOrder.forEach(clearLane);
+  sessionStorage.removeItem("st_lane_media");
+});
+
+document.getElementById("btnAnalyze").addEventListener("click", runDetection);
+
+async function runDetection() {
+  if (window.detectionRunning) return;
+  const activeLanes = laneOrder.filter((lane) => laneMedia[lane]);
+  if (!activeLanes.length) { showAlert("Load at least one lane video or image first."); return; }
+  window.detectionRunning = true;
+  try {
+  const laneResults = await Promise.all(activeLanes.map((lane) => TrafficEngine.runDetection(laneMedia[lane], { lane, persist: false })));
+  if (laneResults.some((item) => !item)) return;
+  TrafficEngine.updateSignalForCounts();
+  const classes = { car: 0, bike: 0, auto: 0, bus: 0, truck: 0, emergency: 0 };
+  let total = 0;
+  laneResults.forEach((result) => { total += result.total; Object.keys(classes).forEach((key) => { classes[key] += result.classes[key]; }); });
+  const overallDensity = TrafficEngine.densityFromCount(Math.round((total / activeLanes.length) * 1.3));
+  const result = { total, classes, inf: Math.max(...laneResults.map((item) => Number(item.inf))), overallDensity,
+    wait: Math.round(8 + total * 1.6), score: Math.min(100, Math.round(total * 3.1 + (classes.emergency ? 15 : 0))),
+    lanes: JSON.parse(JSON.stringify(TrafficEngine.state.lanes)), timestamp: new Date().toISOString() };
+  TrafficEngine.recordCycle(total);
+  TrafficEngine.persistResult(result, currentUser.uid, { sourceCount: activeLanes.length });
+  sessionStorage.setItem("st_lane_counts", JSON.stringify(result.lanes));
+  document.getElementById("s-vc").textContent = result.total;
+  document.getElementById("s-light").textContent = `${result.classes.car} / ${result.classes.bike}`;
+  document.getElementById("s-heavy").textContent = `${result.classes.bus} / ${result.classes.truck}`;
+  document.getElementById("s-emg").textContent = "not supported";
+  document.getElementById("s-inf").textContent = result.inf + " ms";
+  renderJunction();
+  renderLaneTable();
+  if (result.classes.emergency > 0) showAlert("Emergency vehicle detected — signal override issued.");
+  } finally {
+    window.detectionRunning = false;
+  }
+}
+</script>
+</body>
+</html>

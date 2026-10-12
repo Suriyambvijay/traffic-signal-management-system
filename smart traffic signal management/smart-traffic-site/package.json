@@ -1,0 +1,17 @@
+{
+  "name": "smart-traffic-signal-management",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Smart traffic signal management application with an Express API and browser frontend",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}
