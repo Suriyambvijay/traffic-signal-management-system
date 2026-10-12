@@ -1,8 +1,8 @@
 const app = require("../backend/app");
 
-const port = Number(process.env.PORT) || 3000;
-const host = process.env.HOST || "127.0.0.1";
+const PORT = process.env.PORT || 10000;
+const HOST = "0.0.0.0";
 
-app.listen(port, host, () => {
-  console.log(`Smart Traffic app listening at http://${host}:${port}`);
+app.listen(PORT, HOST, () => {
+  console.log(`Smart Traffic app listening on http://${HOST}:${PORT}`);
 });
